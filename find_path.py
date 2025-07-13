@@ -6,6 +6,8 @@ import pickle
 from shapely.geometry import Point, LineString
 from shapely.ops import nearest_points, substring, linemerge
 from itertools import product
+import os
+from create_graph import NETWORK_CONFIGS
 
 print("="*50)
 print("경로탐색 스크립트를 시작합니다.")
@@ -13,24 +15,50 @@ print("="*50)
 
 # --- 1. 설정: 파일 경로 및 탐색 파라미터 ---
 # 전처리된 파일 경로
-GRAPH_PICKLE_PATH = r'd:\multimodal_routing\convert_data\network_graph.pkl'
-LINKS_FEATHER_PATH = r'd:\multimodal_routing\convert_data\links_data.feather'
-NODES_FEATHER_PATH = r'd:\multimodal_routing\convert_data\nodes_data.feather'
-CRS_FILE_PATH = r'd:\multimodal_routing\convert_data\crs.txt'
+# 스크립트 파일의 현재 위치
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 프로젝트 루트 폴더 (현재 폴더의 상위 폴더)
+project_root = os.path.dirname(current_dir)
+
+# 전처리된 데이터가 있는 폴더
+CONVERT_DATA_DIR = os.path.join(project_root, 'convert_data')
+# 결과가 저장될 폴더
+RESULT_DIR = os.path.join(project_root, 'result')
+os.makedirs(RESULT_DIR, exist_ok=True) # 결과 폴더가 없으면 생성
+
+# --- 경로 탐색을 수행할 네트워크 선택 ---
+NETWORK_NAME = 'walk_bike' # 'car', 'walk_bike' 등 'create_graph.py'에 설정된 'name'
+
+# 선택된 네트워크의 설정(컬럼명 등) 가져오기
+try:
+    network_config = next(item for item in NETWORK_CONFIGS if item["name"] == NETWORK_NAME)
+except StopIteration:
+    print(f"오류: '{NETWORK_NAME}'에 대한 설정을 'create_graph.py'에서 찾을 수 없습니다.")
+    exit()
+
+# 사용할 컬럼명 (create_graph.py 설정에서 자동으로 가져옴)
+cols = network_config['cols']
+F_NODE_COL = cols['f_node']
+T_NODE_COL = cols['t_node']
+WEIGHT_COL = cols['weight']
+LINK_ID_COL = cols['link_id']
+NODE_ID_COL = cols['node_id']
+
+# 파일 경로 (네트워크 이름에 따라 동적으로 생성)
+GRAPH_PICKLE_PATH = os.path.join(CONVERT_DATA_DIR, f'{NETWORK_NAME}_network_graph.pkl')
+LINKS_FEATHER_PATH = os.path.join(CONVERT_DATA_DIR, f'{NETWORK_NAME}_links_data.feather')
+NODES_FEATHER_PATH = os.path.join(CONVERT_DATA_DIR, f'{NETWORK_NAME}_nodes_data.feather')
+CRS_FILE_PATH = os.path.join(CONVERT_DATA_DIR, f'{NETWORK_NAME}_crs.txt')
 
 # 결과 저장 경로
-OUTPUT_GEOJSON_PATH = r'd:\multimodal_routing\result\result_path.geojson'
+OUTPUT_GEOJSON_PATH = os.path.join(RESULT_DIR, f'result_path_{NETWORK_NAME}.geojson')
 
 # 출발지/도착지 좌표 (경도, 위도) - WGS84 (EPSG:4326)
 start_coord = (127.0276, 37.4979) # 예: 강남역
 end_coord = (126.9780, 37.5665)   # 예: 서울시청
 
-# 사용할 컬럼명 (전처리 스크립트와 동일해야 함)
-F_NODE_COL = 'F_NODE'
-T_NODE_COL = 'T_NODE'
-WEIGHT_COL = 'LENGTH'
-LINK_ID_COL = 'LINK_ID'
-NODE_ID_COL = 'NODE_ID'
+# 거리 계산의 정확도를 위한 투영 좌표계 (대한민국 중부원점 - EPSG:5186)
+PROJECTED_CRS = "EPSG:5186"
 
 # --- 2. 전처리된 데이터 로드 ---
 try:
@@ -53,7 +81,9 @@ try:
 
     print(f"로드 완료: 노드 {G.number_of_nodes()}개, 엣지 {G.number_of_edges()}개")
 except FileNotFoundError:
-    print("오류: 전처리된 파일(.pkl, .feather)을 찾을 수 없습니다. 'create_graph.py'를 먼저 실행하세요.")
+    print(f"오류: '{NETWORK_NAME}' 네트워크의 전처리된 파일을 찾을 수 없습니다.")
+    print(f"  - 확인 경로: {CONVERT_DATA_DIR}")
+    print("  - 'create_graph.py'를 먼저 실행했는지, NETWORK_NAME이 올바른지 확인하세요.")
     exit()
 
 # GeoDataFrame 생성 및 좌표계 설정
@@ -62,18 +92,24 @@ links_gdf = gpd.GeoDataFrame(links_df, geometry=gpd.GeoSeries.from_wkb(links_df[
 def find_nearest_link_and_projection(coord, links_gdf):
     """
     주어진 좌표(경도, 위도)에서 가장 가까운 링크와 그 링크 위의 투영점을 찾습니다.
+    거리 계산의 정확도를 위해 내부적으로 투영 좌표계를 사용합니다.
     """
     # 입력 좌표를 GeoSeries로 변환 (CRS: WGS84)
     point = gpd.GeoSeries([Point(coord)], crs='EPSG:4326')
-    # 링크 데이터의 좌표계로 변환
-    point_transformed = point.to_crs(links_gdf.crs).iloc[0]
+    
+    # 링크와 포인트를 거리 계산에 적합한 투영 좌표계로 변환
+    links_proj = links_gdf.to_crs(PROJECTED_CRS)
+    point_proj = point.to_crs(PROJECTED_CRS).iloc[0]
 
-    # 가장 가까운 링크 탐색
-    distances = links_gdf.geometry.distance(point_transformed)
+    # 가장 가까운 링크 탐색 (투영 좌표계에서)
+    distances = links_proj.geometry.distance(point_proj)
     nearest_link_idx = distances.idxmin()
+    
+    # 원본 links_gdf에서 가장 가까운 링크를 가져옴
     nearest_link = links_gdf.loc[nearest_link_idx]
 
-    # 링크 위의 가장 가까운 지점(투영점) 계산
+    # 원본 좌표계에서 링크 위의 가장 가까운 지점(투영점) 계산
+    point_transformed = point.to_crs(links_gdf.crs).iloc[0]
     projected_point = nearest_points(point_transformed, nearest_link.geometry)[1]
 
     return nearest_link, projected_point
@@ -164,17 +200,22 @@ else:
         start_segment = LineString(list(start_segment.coords)[::-1]) # 방향 뒤집기
 
     # 2. 중간 경로의 전체 링크 형상
-    middle_link_ids = []
+    middle_segments = []
     for i in range(len(main_path_nodes) - 1):
         u, v = main_path_nodes[i], main_path_nodes[i+1]
+        
+        # 경로 방향(u->v)과 일치하는 링크 검색
         link_row = links_gdf[(links_gdf[F_NODE_COL] == u) & (links_gdf[T_NODE_COL] == v)]
         if not link_row.empty:
-            middle_link_ids.append(link_row.iloc[0][LINK_ID_COL])
-    
-    middle_segments_gdf = links_gdf[links_gdf[LINK_ID_COL].isin(middle_link_ids)].copy()
-    middle_segments_gdf[LINK_ID_COL] = pd.Categorical(middle_segments_gdf[LINK_ID_COL], categories=middle_link_ids, ordered=True)
-    middle_segments_gdf = middle_segments_gdf.sort_values(LINK_ID_COL)
-    middle_segments = list(middle_segments_gdf.geometry)
+            middle_segments.append(link_row.iloc[0].geometry)
+            continue
+
+        # 반대 방향(v->u) 링크 검색 (무방향 그래프용)
+        link_row_reverse = links_gdf[(links_gdf[F_NODE_COL] == v) & (links_gdf[T_NODE_COL] == u)]
+        if not link_row_reverse.empty:
+            geom = link_row_reverse.iloc[0].geometry
+            reversed_geom = LineString(list(geom.coords)[::-1]) # 방향 뒤집기
+            middle_segments.append(reversed_geom)
 
     # 3. 도착 링크의 부분 형상
     end_proj_dist = end_link_geom.project(end_projection)
