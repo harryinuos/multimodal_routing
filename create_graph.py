@@ -15,6 +15,7 @@ NODE_SHP_PATH = r'd:\multimodal_routing\raw_data\[2025-05-12]NODELINKDATA\MOCT_N
 # 저장될 파일 경로
 GRAPH_PICKLE_PATH = r'd:\multimodal_routing\convert_data\network_graph.pkl'
 LINKS_FEATHER_PATH = r'd:\multimodal_routing\convert_data\links_data.feather'
+NODES_FEATHER_PATH = r'd:\multimodal_routing\convert_data\nodes_data.feather'
 CRS_FILE_PATH = r'd:\multimodal_routing\convert_data\crs.txt'
 
 # 사용할 컬럼명
@@ -61,7 +62,13 @@ links_for_path = links_gdf[[LINK_ID_COL, F_NODE_COL, T_NODE_COL, 'geometry']].co
 links_for_path.to_feather(LINKS_FEATHER_PATH)
 print(f"-> 링크 데이터 저장 완료: {LINKS_FEATHER_PATH}")
 
-# 4-3. 좌표계(CRS) 정보 저장
+# 4-3. 노드 데이터 저장 (feather)
+# 경로 탐색 시 좌표로부터 가장 가까운 노드를 찾기 위해 노드 정보도 저장
+nodes_for_path = nodes_gdf[[NODE_ID_COL, 'geometry']].copy()
+nodes_for_path.to_feather(NODES_FEATHER_PATH)
+print(f"-> 노드 데이터 저장 완료: {NODES_FEATHER_PATH}")
+
+# 4-4. 좌표계(CRS) 정보 저장
 with open(CRS_FILE_PATH, 'w') as f:
     f.write(links_gdf.crs.to_string())
 print(f"-> 좌표계 정보 저장 완료: {CRS_FILE_PATH}")

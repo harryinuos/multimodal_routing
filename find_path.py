@@ -3,6 +3,7 @@ import geopandas as gpd
 import networkx as nx
 import pandas as pd
 import pickle
+from shapely.geometry import Point
 
 print("="*50)
 print("경로탐색 스크립트를 시작합니다.")
@@ -12,20 +13,22 @@ print("="*50)
 # 전처리된 파일 경로
 GRAPH_PICKLE_PATH = r'd:\multimodal_routing\convert_data\network_graph.pkl'
 LINKS_FEATHER_PATH = r'd:\multimodal_routing\convert_data\links_data.feather'
+NODES_FEATHER_PATH = r'd:\multimodal_routing\convert_data\nodes_data.feather'
 CRS_FILE_PATH = r'd:\multimodal_routing\convert_data\crs.txt'
 
 # 결과 저장 경로
 OUTPUT_GEOJSON_PATH = r'd:\multimodal_routing\result\result_path.geojson'
 
-# 출발지/도착지 노드
-start_node = 1510224500
-end_node = 3060068203
+# 출발지/도착지 좌표 (경도, 위도) - WGS84 (EPSG:4326)
+start_coord = (127.0276, 37.4979) # 예: 강남역
+end_coord = (126.9780, 37.5665)   # 예: 서울시청
 
 # 사용할 컬럼명 (전처리 스크립트와 동일해야 함)
 F_NODE_COL = 'F_NODE'
 T_NODE_COL = 'T_NODE'
 WEIGHT_COL = 'LENGTH'
 LINK_ID_COL = 'LINK_ID'
+NODE_ID_COL = 'NODE_ID'
 
 # --- 2. 전처리된 데이터 로드 ---
 try:
@@ -37,6 +40,11 @@ try:
     # 링크 데이터 로드
     links_df = pd.read_feather(LINKS_FEATHER_PATH)
 
+    # 노드 데이터 로드
+    nodes_df = pd.read_feather(NODES_FEATHER_PATH)
+    # Feather 포맷은 geometry를 WKB로 저장하므로, GeoDataFrame으로 변환
+    nodes_gdf = gpd.GeoDataFrame(nodes_df, geometry=gpd.GeoSeries.from_wkb(nodes_df['geometry']))
+
     # 좌표계 정보 로드
     with open(CRS_FILE_PATH, 'r') as f:
         crs_info = f.read()
@@ -46,8 +54,27 @@ except FileNotFoundError:
     print("오류: 전처리된 파일(.pkl, .feather)을 찾을 수 없습니다. 'create_graph.py'를 먼저 실행하세요.")
     exit()
 
-# --- 3. 경로 탐색 및 결과 처리 ---
-print(f"\n[2/3] 경로 탐색 중... ({start_node} -> {end_node})")
+# --- 3. 좌표 -> 최근접 노드 변환 ---
+print("\n[2/4] 입력 좌표에서 가장 가까운 노드 탐색 중...")
+nodes_gdf.crs = crs_info # 노드 데이터에 좌표계 정보 설정
+
+def find_nearest_node(coord, nodes_gdf):
+    """주어진 좌표(경도, 위도)에서 가장 가까운 노드를 찾습니다."""
+    # 입력 좌표를 GeoSeries로 변환 (CRS: WGS84)
+    point = gpd.GeoSeries([Point(coord)], crs='EPSG:4326')
+    # 노드 데이터의 좌표계로 변환
+    point_transformed = point.to_crs(nodes_gdf.crs)
+    # 가장 가까운 노드 탐색
+    distances = nodes_gdf.geometry.distance(point_transformed.iloc[0])
+    nearest_node_idx = distances.idxmin()
+    return nodes_gdf.loc[nearest_node_idx][NODE_ID_COL]
+
+start_node = find_nearest_node(start_coord, nodes_gdf)
+end_node = find_nearest_node(end_coord, nodes_gdf)
+print(f"-> 출발 노드: {start_node} (입력: {start_coord})")
+print(f"-> 도착 노드: {end_node} (입력: {end_coord})")
+
+print(f"\n[3/4] 경로 탐색 중... ({start_node} -> {end_node})")
 
 if start_node not in G or end_node not in G:
     print("[탐색 실패] 시작 또는 종료 노드가 그래프에 없습니다.")
@@ -71,7 +98,7 @@ try:
             link_id_path.append(link_row.iloc[0][LINK_ID_COL])
 
     # --- 결과 GeoDataFrame 생성 및 저장 ---
-    print("\n[3/3] 경로 결과를 GeoJSON 파일로 저장 중...")
+    print("\n[4/4] 경로 결과를 GeoJSON 파일로 저장 중...")
     # 추출된 링크 ID로 경로에 해당하는 링크 필터링
     path_links_df = links_df[links_df[LINK_ID_COL].isin(link_id_path)].copy()
 
